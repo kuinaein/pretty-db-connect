@@ -3,8 +3,11 @@
 
 from logging import getLogger, basicConfig as loggingBasicConfig
 import boto3
+from os import path
 import sys
 from time import sleep
+import urllib.request
+from paramiko import SSHClient, AutoAddPolicy
 
 from pretty_config import PRETTY_CONFIG
 
@@ -105,11 +108,10 @@ def ensure_instance(pretty: PrettyDBConnect, subnet_id: str):
         'DeviceIndex': 0,
         'SubnetId': subnet_id,
         'AssociatePublicIpAddress': True,
-        'SubnetId': subnet_id,
     }], TagSpecifications=[
         {'ResourceType': 'instance', 'Tags': pretty.name_tags},
         {'ResourceType': 'volume', 'Tags': pretty.name_tags},
-    ], MaxCount=1, MinCount=1, Monitoring={'Enabled': False})
+    ], KeyName=PRETTY_CONFIG['KEY_NAME'], MaxCount=1, MinCount=1, Monitoring={'Enabled': False})
     inst = pretty.ec2.Instance(inst_res['Instances'][0]['InstanceId'])
     while 16 > inst.state['Code']:  # 16 : running
         sleep(5)
@@ -126,9 +128,82 @@ def find_latest_ubuntu_ami(pretty: PrettyDBConnect):
     return amis[len(amis) - 1]['ImageId']
 
 
+def ensure_security_group(pretty: PrettyDBConnect, instance_id: str):
+    my_ip = ''
+    with urllib.request.urlopen('https://api.ipify.org') as response:
+        my_ip = response.read().decode('ascii')
+
+    ssh_opened = False
+    another_ssh_opened = False
+
+    inst = pretty.ec2.Instance(instance_id)
+    security_group = pretty.ec2.SecurityGroup(
+        inst.security_groups[0]['GroupId'])
+    for perm in security_group.ip_permissions:
+        if 'FromPort' in perm and perm['FromPort'] <= 22 and 22 <= perm['ToPort']:
+            ssh_opened = True
+            continue
+        if 'FromPort' in perm and perm['FromPort'] <= PRETTY_CONFIG['SSH_PORT'] \
+                and PRETTY_CONFIG['SSH_PORT'] <= perm['ToPort']:
+            another_ssh_opened = True
+            continue
+
+    if another_ssh_opened:
+        return PRETTY_CONFIG['SSH_PORT']
+    if not ssh_opened:
+        logger.info('SSHポート22番を「' + my_ip + '/32」に開放します')
+        security_group.authorize_ingress(IpPermissions=[{
+            'IpProtocol': 'tcp',
+            'FromPort': 22, 'ToPort': 22,
+            'IpRanges': [{'CidrIp': my_ip + '/32', 'Description': 'myIP-SSH'}]
+        }])
+    return 22
+
+
+def ensure_ansible(ip: str, ssh_port: int):
+    ssh = SSHClient()
+    ssh.load_system_host_keys()
+    ssh.set_missing_host_key_policy(AutoAddPolicy())
+    ssh.connect(ip, ssh_port, 'ubuntu',
+                key_filename=PRETTY_CONFIG['SSH_KEY_PATH'])
+    try:
+        stdout = ssh.exec_command('which ansible')[1]
+        ansible_path = stdout.read().decode('utf-8')
+        if '' != ansible_path:
+            logger.info('Ansibleのパス: ' + ansible_path)
+            return
+
+        logger.info('Ansibleセットアップ中...')
+        script_dir = path.dirname(path.abspath(__file__))
+        sftp = ssh.open_sftp()
+        try:
+            sftp.put(path.join(script_dir, 'pre-setup.sh'),
+                     '/home/ubuntu/pre-setup.sh')
+            ssh_exec(ssh, 'sudo bash /home/ubuntu/pre-setup.sh')
+        finally:
+            sftp.close()
+    finally:
+        ssh.close()
+
+
+def ssh_exec(ssh: SSHClient, cmd: str):
+    stdout, stderr = ssh.exec_command(cmd)[1:3]
+    buf = stdout.read().decode('utf-8')
+    logger.debug(buf)
+    print(buf)
+    err_msg = stderr.read().decode('utf-8')
+    if '' != err_msg:
+        raise Exception('サーバ上でエラー発生: ' + err_msg)
+    return buf
+
+
 if '__main__' == __name__:
     pretty = PrettyDBConnect()
     vpc_id = ensure_vpc(pretty)
     subnet_id = ensure_subnet(pretty, vpc_id)
     ensure_internet_gateway(pretty, vpc_id)
-    ensure_instance(pretty, subnet_id)
+    instance_id = ensure_instance(pretty, subnet_id)
+    ssh_port = ensure_security_group(pretty, instance_id)
+
+    ip = pretty.ec2.Instance(instance_id).public_ip_address
+    ensure_ansible(ip, ssh_port)
