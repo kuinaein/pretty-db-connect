@@ -40,16 +40,19 @@ def ensure_vpc(pretty: PrettyDBConnect):
         sleep(1)
         vpc.load()
     vpc.create_tags(Tags=pretty.name_tags)
-    boto_first(vpc.security_groups).create_tags(Tags=pretty.name_tags)
     boto_first(vpc.network_acls).create_tags(Tags=pretty.name_tags)
     boto_first(vpc.route_tables).create_tags(Tags=pretty.name_tags)
+
+    security_group = boto_first(vpc.security_groups)
+    security_group.create_tags(Tags=pretty.name_tags)
+
     return vpc.id
 
 
 def ensure_subnet(pretty: PrettyDBConnect, vpc_id: str):
     vpc = pretty.ec2.Vpc(vpc_id)
     if (0 < len(list(vpc.subnets.limit(count=1)))):
-        return
+        return boto_first(vpc.subnets).id
 
     logger.info('サブネットの作成中...')
     subnet = vpc.create_subnet(CidrBlock=PRETTY_CONFIG['VPC_CIDR_BLOCK'])
@@ -81,8 +84,51 @@ def ensure_internet_gateway(pretty: PrettyDBConnect, vpc_id: str):
     return gateway.id
 
 
+def ensure_instance(pretty: PrettyDBConnect, subnet_id: str):
+    inst_res = pretty.ec2_client.describe_instances(
+        Filters=[{'Name': 'tag:Name', 'Values': [pretty.name_base]}])
+    if 1 == len(inst_res['Reservations']):
+        return inst_res['Reservations'][0]['Instances'][0]['InstanceId']
+    if 1 < len(inst_res['Reservations']):
+        raise Exception('同名のEC2インスタンスが2つ以上あります: ' + pretty.name_base)
+
+    logger.info('EC2インスタンスの作成中...')
+    ami_id = find_latest_ubuntu_ami(pretty)
+    inst_res = pretty.ec2_client.run_instances(InstanceType='t2.micro', ImageId=ami_id, BlockDeviceMappings=[{
+        'DeviceName': '/dev/sda1',
+        'Ebs': {
+            'DeleteOnTermination': True,
+            'VolumeSize': PRETTY_CONFIG['VOLUME_SIZE'],
+            'VolumeType': 'gp2',
+        },
+    }], NetworkInterfaces=[{
+        'DeviceIndex': 0,
+        'SubnetId': subnet_id,
+        'AssociatePublicIpAddress': True,
+        'SubnetId': subnet_id,
+    }], TagSpecifications=[
+        {'ResourceType': 'instance', 'Tags': pretty.name_tags},
+        {'ResourceType': 'volume', 'Tags': pretty.name_tags},
+    ], MaxCount=1, MinCount=1, Monitoring={'Enabled': False})
+    inst = pretty.ec2.Instance(inst_res['Instances'][0]['InstanceId'])
+    while 16 > inst.state['Code']:  # 16 : running
+        sleep(5)
+        inst.load()
+    inst.network_interfaces[0].create_tags(Tags=pretty.name_tags)
+    return inst.id
+
+
+def find_latest_ubuntu_ami(pretty: PrettyDBConnect):
+    ami_res = pretty.ec2_client.describe_images(Owners=[PRETTY_CONFIG['AMI_OWNER']], Filters=[{
+        'Name': 'name', 'Values': [PRETTY_CONFIG['AMI_NAME']]}])
+    amis = ami_res['Images']
+    amis = sorted(amis, key=lambda im: im['Name'])
+    return amis[len(amis) - 1]['ImageId']
+
+
 if '__main__' == __name__:
     pretty = PrettyDBConnect()
     vpc_id = ensure_vpc(pretty)
-    ensure_subnet(pretty, vpc_id)
+    subnet_id = ensure_subnet(pretty, vpc_id)
     ensure_internet_gateway(pretty, vpc_id)
+    ensure_instance(pretty, subnet_id)
