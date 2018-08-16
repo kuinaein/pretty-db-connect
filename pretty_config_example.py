@@ -12,4 +12,5 @@ PRETTY_CONFIG = {
     'DB_PORT': 34543,
     'SSH_KEY_PATH': os.path.expanduser('~/.ssh/id_rsa'),
     'RESOURCE_NAME': 'precon',
+    'REMOTE_HOME': '/home/ubuntu',
 }

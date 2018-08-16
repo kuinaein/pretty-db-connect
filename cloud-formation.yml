@@ -100,7 +100,7 @@ Resources:
             - ''
             - - !Ref MyIP
               - '/32'
-          Description: SSH
+          Description: DB
       Tags:
         - Key: Name
           Value: !Ref ResourceBaseName

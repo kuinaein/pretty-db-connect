@@ -1,0 +1,75 @@
+- hosts: localhost
+  connection: local
+  become: yes
+
+  vars:
+    pgsql_conf_dir: /etc/postgresql/10/main
+
+  tasks:
+    - name: EDITOR を vim にする
+      lineinfile:
+        path: /home/{{ ansible_user }}/.bashrc
+        regexp: ^export\s+EDITOR=
+        line: export EDITOR=vim
+
+    - name: 日本語関連パッケージをインストールする
+      package: 'name={{ item }} state=present'
+      with_items:
+        - language-pack-ja-base
+        - language-pack-ja
+        - manpages-ja
+        - manpages-ja-dev
+
+    - name: システムの文字セットを日本語にする
+      shell: localectl set-locale LANG=ja_JP.UTF-8 LANGUAGE="ja_JP:ja"
+      when: "'ja_JP.UTF-8' != lookup('env','LANG')"
+
+    - name: タイムゾーンを確認する
+      shell: readlink /etc/localtime
+      register: tz
+      changed_when: false
+
+    - name: タイムゾーンを東京標準時にする
+      shell: >-
+        ln -sf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime &&
+        dpkg-reconfigure -f noninteractive tzdata
+      when: "'/usr/share/zoneinfo/Asia/Tokyo' != tz.stdout"
+
+    - name: 'SSHのポート番号を{{ ssh_port }}にする'
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: ^Port\s+[0-9]+$
+        line: 'Port {{ ssh_port }}'
+      notify: restart_ssh
+
+    - name: PostgreSQLをインストールする
+      package: name=postgresql state=present
+    # Ubuntu 18.04 LTS の PostgreSQL 10.5 はデフォルトで「ssl = on」になっている
+
+    - name: 'PostgreSQLのポート番号を{{ db_port }}にする'
+      lineinfile:
+        path: '{{ pgsql_conf_dir }}/postgresql.conf'
+        regexp: ^port\s*=\s*[0-9]+
+        line: 'port = {{ db_port }}'
+      notify: restart_pgsql
+
+    - name: PostgreSQLへ外部から接続できるようにする
+      lineinfile:
+        path: '{{ pgsql_conf_dir }}/postgresql.conf'
+        regexp: ^listen_addresses\s*=
+        # ここで絞るとセキュリティグループとの二重管理になるので全開放で良い
+        line: "listen_addresses = '*'"
+      notify: restart_pgsql
+
+    - name: PostgreSQLへ外部からログインできるようにする
+      lineinfile:
+        path: '{{ pgsql_conf_dir }}/pg_hba.conf'
+        regexp: hostssl\s+all\s+
+        line: hostssl all all 0.0.0.0/0 md5
+      notify: restart_pgsql
+
+  handlers:
+    - name: restart_ssh
+      service: name=ssh state=restarted
+    - name: restart_pgsql
+      service: name=postgresql state=restarted

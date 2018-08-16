@@ -3,9 +3,11 @@
 
 from logging import getLogger, basicConfig as loggingBasicConfig
 import boto3
+from paramiko import SSHClient, AutoAddPolicy
+import os
 from os import path
 import urllib.request
-from paramiko import SSHClient, AutoAddPolicy
+import errno
 
 from pretty_config import PRETTY_CONFIG
 
@@ -13,74 +15,108 @@ loggingBasicConfig(level=PRETTY_CONFIG['LOG_LEVEL'])
 logger = getLogger(__name__)
 
 
-class PrettyDBConnect:
-    def __init__(self):
-        self.name_base = PRETTY_CONFIG['RESOURCE_NAME_BASE']
-        self.ec2_client = boto3.client('ec2')
-        self.ec2 = boto3.resource('ec2')
-        self.name_tags = [{'Key': 'Name', 'Value': self.name_base}]
+def get_instance(ec2_client, ec2):
+    inst_res = ec2_client.describe_instances(
+        Filters=[{'Name': 'tag:Name', 'Values': [PRETTY_CONFIG['RESOURCE_NAME']]}])
+    if ('Reservations' not in inst_res) or (0 == len(inst_res['Reservations'])):
+        raise Exception('EC2インスタンスが見つかりません')
+    if 1 < len(inst_res['Reservations']):
+        raise Exception('同名のEC2インスタンスが2つ以上あります: ' +
+                        PRETTY_CONFIG['RESOURCE_NAME'])
+    return ec2.Instance(
+        inst_res['Reservations'][0]['Instances'][0]['InstanceId'])
 
 
-def boto_first(collection):
-    return list(collection.limit(count=1))[0]
+def ensure_security_group(ec2_client, ec2, instance, my_ip: str):
+    security_group = None
+    for sg_desc in instance.security_groups:
+        sg = ec2.SecurityGroup(sg_desc['GroupId'])
+        matched = False
+        for tag in sg.tags:
+            if 'Name' == tag['Key'] and PRETTY_CONFIG['RESOURCE_NAME'] == tag['Value']:
+                matched = True
+                break
+        if matched:
+            security_group = sg
+            break
+    if security_group is None:
+        raise Exception('セキュリティグループ {} が見つかりません'.format(
+            PRETTY_CONFIG['RESOURCE_NAME']))
 
+    my_cidr = my_ip + '/32'
 
-def ensure_security_group(pretty: PrettyDBConnect, instance_id: str):
-    my_ip = ''
-    with urllib.request.urlopen('https://api.ipify.org') as response:
-        my_ip = response.read().decode('ascii')
-
-    ssh_opened = False
-    another_ssh_opened = False
-
-    inst = pretty.ec2.Instance(instance_id)
-    security_group = pretty.ec2.SecurityGroup(
-        inst.security_groups[0]['GroupId'])
     for perm in security_group.ip_permissions:
-        if 'FromPort' in perm and perm['FromPort'] <= 22 and 22 <= perm['ToPort']:
-            ssh_opened = True
+        if PRETTY_CONFIG['SSH_PORT'] != perm['FromPort'] and PRETTY_CONFIG['DB_PORT'] != perm['FromPort']:
             continue
-        if 'FromPort' in perm and perm['FromPort'] <= PRETTY_CONFIG['SSH_PORT'] \
-                and PRETTY_CONFIG['SSH_PORT'] <= perm['ToPort']:
-            another_ssh_opened = True
-            continue
+        cur_cidr = perm['IpRanges'][0]['CidrIp']
+        if my_cidr != cur_cidr:
+            security_group.revoke_ingress(IpPermissions=[{
+                'IpProtocol': 'tcp',
+                'FromPort': perm['FromPort'], 'ToPort': perm['ToPort'],
+                'IpRanges': [{'CidrIp': cur_cidr}]
+            }])
+            security_group.authorize_ingress(IpPermissions=[{
+                'IpProtocol': 'tcp',
+                'FromPort': perm['FromPort'], 'ToPort': perm['ToPort'],
+                'IpRanges': [{
+                    'CidrIp': my_cidr,
+                    'Description': perm['IpRanges'][0]['Description'],
+                }]
+            }])
 
-    if another_ssh_opened:
-        return PRETTY_CONFIG['SSH_PORT']
-    if not ssh_opened:
-        logger.info('SSHポート22番を「' + my_ip + '/32」に開放します')
-        security_group.authorize_ingress(IpPermissions=[{
-            'IpProtocol': 'tcp',
-            'FromPort': 22, 'ToPort': 22,
-            'IpRanges': [{'CidrIp': my_ip + '/32', 'Description': 'myIP-SSH'}]
-        }])
-    return 22
+    logger.info('SSHポート22番を「{}」に開放します'.format(my_cidr))
+    security_group.authorize_ingress(IpPermissions=[{
+        'IpProtocol': 'tcp',
+        'FromPort': 22, 'ToPort': 22,
+        'IpRanges': [{'CidrIp': my_cidr, 'Description': 'myIP-SSH'}]
+    }])
 
 
-def ensure_ansible(ip: str, ssh_port: int):
+def clean_security_group(ec2_client, ec2, instance, my_ip: str):
+    security_group = ec2.SecurityGroup(instance.security_groups[0]['GroupId'])
+    security_group.revoke_ingress(IpPermissions=[{
+        'IpProtocol': 'tcp',
+        'FromPort': 22, 'ToPort': 22,
+        'IpRanges': [{'CidrIp': my_ip + '/32', 'Description': 'myIP-SSH'}]
+    }])
+    logger.info('SSHポート22番を封鎖しました')
+
+
+def init_instance(ip: str):
     ssh = SSHClient()
     ssh.load_system_host_keys()
     ssh.set_missing_host_key_policy(AutoAddPolicy())
-    ssh.connect(ip, ssh_port, 'ubuntu',
-                key_filename=PRETTY_CONFIG['SSH_KEY_PATH'])
     try:
-        stdout = ssh.exec_command('which ansible')[1]
-        ansible_path = stdout.read().decode('utf-8')
-        if '' != ansible_path:
-            logger.info('Ansibleのパス: ' + ansible_path)
-            return
-
-        logger.info('Ansibleセットアップ中...')
-        script_dir = path.dirname(path.abspath(__file__))
-        sftp = ssh.open_sftp()
         try:
-            sftp.put(path.join(script_dir, 'pre-setup.sh'),
-                     '/home/ubuntu/pre-setup.sh')
-            ssh_exec(ssh, 'sudo bash /home/ubuntu/pre-setup.sh')
-        finally:
-            sftp.close()
+            ssh.connect(ip, 22, 'ubuntu', timeout=10,
+                        key_filename=PRETTY_CONFIG['SSH_KEY_PATH'])
+        except Exception as ex:
+            logger.error(ex)
+            logger.error('ポート{}番に再接続します'.format(PRETTY_CONFIG['SSH_PORT']))
+            ssh.connect(ip, PRETTY_CONFIG['SSH_PORT'], 'ubuntu', timeout=10,
+                        key_filename=PRETTY_CONFIG['SSH_KEY_PATH'])
+        ensure_ansible(ssh)
+        do_ansible(ssh)
     finally:
         ssh.close()
+
+
+def ensure_ansible(ssh: SSHClient):
+    stdout = ssh.exec_command('which ansible')[1]
+    ansible_path = stdout.read().decode('utf-8')
+    if '' != ansible_path:
+        logger.info('Ansibleのパス: ' + ansible_path)
+        return
+
+    logger.info('Ansibleセットアップ中...')
+    script_dir = path.dirname(path.abspath(__file__))
+    sftp = ssh.open_sftp()
+    try:
+        remote_sh = PRETTY_CONFIG['REMOTE_HOME'] + '/pre-setup.sh'
+        sftp.put(path.join(script_dir, 'pre-setup.sh'), remote_sh)
+        ssh_exec(ssh, remote_sh)
+    finally:
+        sftp.close()
 
 
 def ssh_exec(ssh: SSHClient, cmd: str):
@@ -89,15 +125,50 @@ def ssh_exec(ssh: SSHClient, cmd: str):
     logger.debug(buf)
     print(buf)
     err_msg = stderr.read().decode('utf-8')
-    if '' != err_msg:
-        raise Exception('サーバ上でエラー発生: ' + err_msg)
-    return buf
+    logger.info(err_msg)
+
+
+def do_ansible(ssh: SSHClient):
+    script_dir = path.dirname(path.abspath(__file__))
+    ansible_dir = path.join(script_dir, 'ansible')
+    remote_ansible_dir = PRETTY_CONFIG['REMOTE_HOME'] + '/ansible'
+
+    sftp = ssh.open_sftp()
+    try:
+        try:
+            sftp.stat(remote_ansible_dir)
+            ssh_exec(ssh, 'rm -rf ' + remote_ansible_dir)
+        except IOError as ex:
+            if errno.ENOENT != ex.errno:
+                raise ex
+            logger.debug(ex)
+        sftp.mkdir(remote_ansible_dir, 0o755)
+        # どうやら paramiko には再帰コピー機能がないようなので地道にコピー
+        for fname in os.listdir(ansible_dir):
+            sftp.put(path.join(ansible_dir, fname),
+                     remote_ansible_dir + '/' + fname)
+    finally:
+        sftp.close()
+
+    logger.info('リモートサーバ上でAnsibleを実行します')
+    ssh_exec(ssh, 'ansible-playbook -i {inv} -e ssh_port={ssh} -e db_port={db} {book}'.format(
+        inv=remote_ansible_dir + '/hosts.yml',
+        book=remote_ansible_dir + '/db.yml',
+        ssh=PRETTY_CONFIG['SSH_PORT'],
+        db=PRETTY_CONFIG['DB_PORT'],
+    ))
 
 
 if '__main__' == __name__:
-    # FIXME
-    pretty = PrettyDBConnect()
-    ssh_port = ensure_security_group(pretty, instance_id)
+    my_ip = ''
+    with urllib.request.urlopen('https://api.ipify.org') as response:
+        my_ip = response.read().decode('ascii')
 
-    ip = pretty.ec2.Instance(instance_id).public_ip_address
-    ensure_ansible(ip, ssh_port)
+    ec2_client = boto3.client('ec2')
+    ec2 = boto3.resource('ec2')
+    instance = get_instance(ec2_client, ec2)
+    ensure_security_group(ec2_client, ec2, instance, my_ip)
+    try:
+        init_instance(instance.public_ip_address)
+    finally:
+        clean_security_group(ec2_client, ec2, instance, my_ip)
