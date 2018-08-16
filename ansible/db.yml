@@ -68,6 +68,27 @@
         line: hostssl all all 0.0.0.0/0 md5
       notify: restart_pgsql
 
+    - name: PostgreSQLのエンコーディングを確認する
+      become: yes
+      become_user: postgres
+      shell: >-
+        psql -c '\pset tuples_only' -c '\pset format unaligned'
+        -c "select pg_encoding_to_char(encoding), datcollate from pg_catalog.pg_database where datname = 'template1'" |
+        tail -1
+      register: pgsqlEncoding
+      changed_when: false
+
+    - name: PostgreSQLのエンコーディングを修正する
+      when: "'UTF8|C' != pgsqlEncoding.stdout"
+      become: yes
+      become_user: postgres
+      shell: 'psql -c "{{ item }}"'
+      with_items:
+        - "UPDATE pg_database SET datistemplate = FALSE WHERE datname = 'template1'"
+        - DROP DATABASE template1
+        - CREATE DATABASE template1 WITH TEMPLATE = template0 ENCODING = 'UTF8' LC_COLLATE = 'C' LC_CTYPE = 'C'
+        - "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'template1'"
+
   handlers:
     - name: restart_ssh
       service: name=ssh state=restarted
