@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  MyIP:
+    Type: String
+    Description: Your IP address
+    AllowedPattern: ^([12]?[0-9]{1,2}\.){3}[12]?[0-9]{1,2}$
+  SshPortNumber:
+    Default: 23432
+    Type: Number
+  DbPortNumber:
+    Default: 34543
+    Type: Number
+  SshKeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+  ResourceBaseName:
+    Default: precon
+    Type: String
+    Description: Name tag value
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    # ubuntu/images/hvm-ssd/ubuntu-bionic-18.04-amd64-server-20180814
+    Default: ami-0ee0b7ac4daa15e1d
+  InstanceType:
+    Default: t2.micro
+    Type: String
+    MinLength: 1
+    Description: EC2 instance type
+  VolumeSize:
+    Default: 20
+    Type: Number
+    Description: '(unit: GB) EBS storage capacity'
+  CidrBlock:
+    Default: 192.168.128.0/24
+    Type: String
+    Description: IP address range
+    AllowedPattern: ^([12]?[0-9]{1,2}\.){3}[12]?[0-9]{1,2}\/[0-9]{1,2}$
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref CidrBlock
+      Tags:
+        - Key: Name
+          Value: !Ref ResourceBaseName
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref CidrBlock
+      Tags:
+        - Key: Name
+          Value: !Ref ResourceBaseName
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Ref ResourceBaseName
+  SubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref Subnet
+  Gateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref ResourceBaseName
+  VpcGatewayAssoc:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref Gateway
+      VpcId: !Ref Vpc
+  Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTable
+      GatewayId: !Ref Gateway
+      DestinationCidrBlock: 0.0.0.0/0
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Ref ResourceBaseName
+      GroupDescription: !Ref ResourceBaseName
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref SshPortNumber
+          ToPort: !Ref SshPortNumber
+          CidrIp: !Join
+            - ''
+            - - !Ref MyIP
+              - '/32'
+          Description: SSH
+        - IpProtocol: tcp
+          FromPort: !Ref DbPortNumber
+          ToPort: !Ref DbPortNumber
+          CidrIp: !Join
+            - ''
+            - - !Ref MyIP
+              - '/32'
+          Description: SSH
+      Tags:
+        - Key: Name
+          Value: !Ref ResourceBaseName
+      VpcId: !Ref Vpc
+  Ec2Intstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: !Ref VolumeSize
+            VolumeType: gp2
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref SshKeyName
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref SecurityGroup
+          SubnetId: !Ref Subnet
+      Tags:
+        - Key: Name
+          Value: !Ref ResourceBaseName
