@@ -111,6 +111,8 @@ Resources:
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
+            # true にするとテンプレート更新等で意図せず置換になったときに誤爆する可能性あり
+            DeleteOnTermination: false
             VolumeSize: !Ref VolumeSize
             VolumeType: gp2
       ImageId: !Ref AmiId
