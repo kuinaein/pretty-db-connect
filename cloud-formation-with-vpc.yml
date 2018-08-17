@@ -1,4 +1,4 @@
-# 構築済みの VPC 内に作る場合
+# VPCごと構築する場合
 
 AWSTemplateFormatVersion: 2010-09-09
 Parameters:
@@ -37,11 +37,56 @@ Parameters:
     Default: 8
     Type: Number
     Description: '(unit: GB) EBS storage capacity'
-  Vpc:
-    Type: AWS::EC2::VPC::Id
-  Subnet:
-    Type: AWS::EC2::Subnet::Id
+  CidrBlock:
+    Default: 192.168.128.0/24
+    Type: String
+    Description: IP address range
+    AllowedPattern: ^([0-9]+\.){3}[0-9]+\/[0-9]+$
 Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref CidrBlock
+      Tags:
+        - Key: Name
+          Value: !Ref ResourceBaseName
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref CidrBlock
+      Tags:
+        - Key: Name
+          Value: !Ref ResourceBaseName
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Ref ResourceBaseName
+  SubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref Subnet
+  Gateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref ResourceBaseName
+  VpcGatewayAssoc:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref Gateway
+      VpcId: !Ref Vpc
+  Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTable
+      GatewayId: !Ref Gateway
+      DestinationCidrBlock: 0.0.0.0/0
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -73,7 +118,6 @@ Resources:
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
-            # true にするとテンプレート更新等で意図せず置換になったときに誤爆する可能性あり
             DeleteOnTermination: false
             VolumeSize: !Ref VolumeSize
             VolumeType: gp2

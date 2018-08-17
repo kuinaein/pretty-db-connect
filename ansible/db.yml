@@ -24,16 +24,16 @@
       shell: localectl set-locale LANG=ja_JP.UTF-8 LANGUAGE="ja_JP:ja"
       when: "'ja_JP.UTF-8' != lookup('env','LANG')"
 
-    - name: タイムゾーンを確認する
-      shell: readlink /etc/localtime
-      register: tz
-      changed_when: false
+    - name: タイムゾーンを東京標準時にする_1
+      file:
+        state: link
+        path: /etc/localtime
+        src: /usr/share/zoneinfo/Asia/Tokyo
+      register: tzChanged
 
-    - name: タイムゾーンを東京標準時にする
-      shell: >-
-        ln -sf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime &&
-        dpkg-reconfigure -f noninteractive tzdata
-      when: "'/usr/share/zoneinfo/Asia/Tokyo' != tz.stdout"
+    - name: タイムゾーンを東京標準時にする_2
+      shell: dpkg-reconfigure -f noninteractive tzdata
+      when: tzChanged.changed
 
     - name: 'SSHのポート番号を{{ ssh_port }}にする'
       lineinfile:
@@ -51,7 +51,11 @@
         path: '{{ pgsql_conf_dir }}/postgresql.conf'
         regexp: ^port\s*=\s*[0-9]+
         line: 'port = {{ db_port }}'
-      notify: restart_pgsql
+      register: pgsqlPortChanged
+
+    - name: PostgreSQLのポート番号を変更した場合は即再起動する
+      service: name=postgresql state=restarted
+      when: pgsqlPortChanged.changed
 
     - name: PostgreSQLへ外部から接続できるようにする
       lineinfile:
