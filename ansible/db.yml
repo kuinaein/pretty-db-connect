@@ -72,9 +72,8 @@
       become: yes
       become_user: postgres
       shell: >-
-        psql -c '\pset tuples_only' -c '\pset format unaligned'
-        -c "select pg_encoding_to_char(encoding), datcollate from pg_catalog.pg_database where datname = 'template1'" |
-        tail -1
+        psql --tuples-only --no-align
+        -c "select pg_encoding_to_char(encoding), datcollate from pg_catalog.pg_database where datname = 'template1'"
       register: pgsqlEncoding
       changed_when: false
 

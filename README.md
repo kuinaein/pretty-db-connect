@@ -10,7 +10,7 @@
 
 ## 使い方
 
-1. EC2 で[キーペア](https://ap-northeast-1.console.aws.amazon.com/ec2/v2/home?region=ap-northeast-1#KeyPairs)を作成しておく。
+1. EC2 管理コンソールで[キーペア](https://ap-northeast-1.console.aws.amazon.com/ec2/v2/home?region=ap-northeast-1#KeyPairs)を作成しておく。
 1. AWS アクセスキーを取得して `$HOME/.aws/credentials` を設定する。
    - 必要なアクセス権限は[iam-init.json](https://github.com/kuinaein/pretty-db-connect/blob/release/iam-init.json)を参照のこと。
 1. CloudFormation で[cloud-fomation.yml](https://github.com/kuinaein/pretty-db-connect/blob/release/cloud-formation.yml)からスタックを作成する。
