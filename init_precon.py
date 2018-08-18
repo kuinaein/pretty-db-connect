@@ -171,7 +171,7 @@ if '__main__' == __name__:
     PRETTY_CONFIG = import_module(args.config_name).PRETTY_CONFIG
     loggingBasicConfig(level=PRETTY_CONFIG['LOG_LEVEL'])
 
-    if PRETTY_CONFIG['LOCAL']:
+    if PRETTY_CONFIG.get('LOCAL', False):
         init_instance('127.0.0.1')
         exit(0)
 
