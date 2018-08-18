@@ -3,14 +3,15 @@
 
 # pretty_config.pyにコピーしてご利用ください。
 
-import os
+from os import path
 import logging
 
 PRETTY_CONFIG = {
     'LOG_LEVEL': logging.INFO,
     'SSH_PORT': 23432,
     'DB_PORT': 34543,
-    'SSH_KEY_PATH': os.path.expanduser('~/.ssh/id_rsa'),
+    'SSH_KEY_PATH': path.expanduser('~/.ssh/id_rsa'),
     'RESOURCE_NAME': 'precon',
+    'SSH_USER': 'ubuntu',
     'REMOTE_HOME': '/home/ubuntu',
 }

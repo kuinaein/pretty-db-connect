@@ -1,4 +1,6 @@
 __pycache__
 .env
+.vagrant
 
 pretty_config.py
+*.log

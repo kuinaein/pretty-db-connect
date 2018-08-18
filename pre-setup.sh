@@ -2,8 +2,8 @@
 set -eu
 
 export DEBIAN_FRONTEND=noninteractive
-apt-add-repository ppa:ansible/ansible
+apt-add-repository -y ppa:ansible/ansible
 # aptコマンドのCLIインターフェイスは不安定らしい
-apt-get update
+apt-get update -y
 apt-get install -y ansible git
 apt-get full-upgrade -y

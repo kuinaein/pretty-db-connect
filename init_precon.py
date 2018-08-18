@@ -4,15 +4,28 @@
 from logging import getLogger, basicConfig as loggingBasicConfig
 import boto3
 from paramiko import SSHClient, AutoAddPolicy
+from importlib import import_module
+from sys import exit
 import os
 from os import path
-import urllib.request
 import errno
+from argparse import ArgumentParser
+import urllib.request
 
-from pretty_config import PRETTY_CONFIG
+from pretty_common import ssh_exec
 
-loggingBasicConfig(level=PRETTY_CONFIG['LOG_LEVEL'])
+
 logger = getLogger(__name__)
+PRETTY_CONFIG = None
+
+
+def init_arg_parser():
+    arg_parser = ArgumentParser(
+        usage='python {} [-c <config_name>] [-h]'.format(path.basename(__file__)))
+    arg_parser.add_argument('-c', '--config', type=str,
+                            dest='config_name', default='pretty_config',
+                            help='default: pretty_config')
+    return arg_parser
 
 
 def get_instance(ec2_client, ec2):
@@ -87,14 +100,16 @@ def init_instance(ip: str):
     ssh.load_system_host_keys()
     ssh.set_missing_host_key_policy(AutoAddPolicy())
     try:
-        try:
-            ssh.connect(ip, 22, 'ubuntu', timeout=10,
-                        key_filename=PRETTY_CONFIG['SSH_KEY_PATH'])
-        except Exception as ex:
-            logger.error(ex)
-            logger.error('ポート{}番に再接続します'.format(PRETTY_CONFIG['SSH_PORT']))
-            ssh.connect(ip, PRETTY_CONFIG['SSH_PORT'], 'ubuntu', timeout=10,
-                        key_filename=PRETTY_CONFIG['SSH_KEY_PATH'])
+        ssh.connect(ip, 22, PRETTY_CONFIG['SSH_USER'],
+                    timeout=10,
+                    key_filename=PRETTY_CONFIG['SSH_KEY_PATH'])
+    except Exception as ex:
+        logger.error(ex)
+        logger.error('ポート{}番に再接続します'.format(PRETTY_CONFIG['SSH_PORT']))
+        ssh.connect(ip, PRETTY_CONFIG['SSH_PORT'], PRETTY_CONFIG['SSH_USER'],
+                    timeout=10,
+                    key_filename=PRETTY_CONFIG['SSH_KEY_PATH'])
+    try:
         ensure_ansible(ssh)
         do_ansible(ssh)
     finally:
@@ -117,17 +132,6 @@ def ensure_ansible(ssh: SSHClient):
     finally:
         sftp.close()
     ssh_exec(ssh, 'sudo bash ' + remote_sh)
-
-
-def ssh_exec(ssh: SSHClient, cmd: str):
-    logger.debug(cmd)
-    stdout, stderr = ssh.exec_command(cmd)[1:3]
-    buf = stdout.read().decode('utf-8')
-    logger.debug(buf)
-    print(buf)
-    err_msg = stderr.read().decode('utf-8')
-    if '' != err_msg:
-        raise Exception('リモートサーバ上でコマンド実行に失敗: ' + err_msg)
 
 
 def do_ansible(ssh: SSHClient):
@@ -162,15 +166,26 @@ def do_ansible(ssh: SSHClient):
 
 
 if '__main__' == __name__:
+    arg_parser = init_arg_parser()
+    args = arg_parser.parse_args()
+    PRETTY_CONFIG = import_module(args.config_name).PRETTY_CONFIG
+    loggingBasicConfig(level=PRETTY_CONFIG['LOG_LEVEL'])
+
+    if PRETTY_CONFIG['LOCAL']:
+        init_instance('127.0.0.1')
+        exit(0)
+
     my_ip = ''
     with urllib.request.urlopen('https://api.ipify.org') as response:
         my_ip = response.read().decode('ascii')
+    logger.info('接続元IPアドレス: ' + my_ip)
 
     ec2_client = boto3.client('ec2')
     ec2 = boto3.resource('ec2')
     instance = get_instance(ec2_client, ec2)
     ensure_security_group(ec2_client, ec2, instance, my_ip)
     try:
+        logger.info('接続先IPアドレス: ' + instance.public_ip_address)
         init_instance(instance.public_ip_address)
     finally:
         clean_security_group(ec2_client, ec2, instance, my_ip)
