@@ -20,14 +20,12 @@ loggingBasicConfig(level=DEBUG)
 
 
 def test_connect():
-    def in_ssh(ssh: SSHClient):
-        ssh_exec(
-            ssh, 'sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD \'postgres\'"')
-    ssh_do(PRETTY_CONFIG['SSH_PORT'], in_ssh)
+    ssh_do(PRETTY_CONFIG['SSH_PORT'],
+           lambda ssh: ssh_exec(ssh, 'echo hello, world!'))
     logger.info('SSH接続テスト: OK')
     db_conn = psycopg2.connect(
-        host='127.0.0.1', port=PRETTY_CONFIG['DB_PORT'], dbname='postgres',
-        user='postgres', password='postgres')
+        host='127.0.0.1', port=PRETTY_CONFIG['DB_PORT'],
+        user=PRETTY_CONFIG['DB_USER'], password=PRETTY_CONFIG['DB_PASSWORD'])
     try:
         cur = db_conn.cursor()
         try:

@@ -8,6 +8,8 @@ PRETTY_CONFIG = {
     'LOG_LEVEL': logging.DEBUG,
     'SSH_PORT': 23432,
     'DB_PORT': 34543,
+    'DB_USER': 'pgsql',
+    'DB_PASSWORD': 'pgsql',
     'SSH_KEY_PATH': path.join(
         path.dirname(__file__), '.vagrant/machines/default/virtualbox/private_key'),
     # 'RESOURCE_NAME': 'precon',

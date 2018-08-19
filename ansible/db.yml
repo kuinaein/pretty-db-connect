@@ -3,18 +3,20 @@
   become: yes
 
   vars:
-    pgsql_conf_dir: /etc/postgresql/10/main
+    docker_prj: /root/docker-postgres
+    postgres_data: /opt/docker-postgres
 
   tasks:
     - name: EDITOR を vim にする
       lineinfile:
-        path: /home/{{ ansible_user }}/.bashrc
+        path: '{{ ansible_env.HOME }}/.bashrc'
         regexp: ^export\s+EDITOR=
         line: export EDITOR=vim
 
-    - name: 日本語関連パッケージをインストールする
-      package: 'name={{ item }} state=present'
+    - package: 'name={{ item }} state=present'
       with_items:
+        - ssl-cert # SSL接続のために必要
+        - postgresql-client
         - language-pack-ja-base
         - language-pack-ja
         - manpages-ja
@@ -29,71 +31,102 @@
         state: link
         path: /etc/localtime
         src: /usr/share/zoneinfo/Asia/Tokyo
-      register: tzChanged
+      register: tz
 
     - name: タイムゾーンを東京標準時にする_2
       shell: dpkg-reconfigure -f noninteractive tzdata
-      when: tzChanged.changed
+      when: tz.changed
 
     - name: 'SSHのポート番号を{{ ssh_port }}にする'
       lineinfile:
         path: /etc/ssh/sshd_config
         regexp: ^Port\s+[0-9]+$
         line: 'Port {{ ssh_port }}'
-      notify: restart_ssh
+      register: sshPort
 
-    - name: PostgreSQLをインストールする
-      package: name=postgresql state=present
-    # Ubuntu 18.04 LTS の PostgreSQL 10.5 はデフォルトで「ssl = on」になっている
+    - name: SSHのポート番号を変更した場合は即リロードさせる
+      when: sshPort.changed
+      service: name=ssh state=restarted
 
-    - name: 'PostgreSQLのポート番号を{{ db_port }}にする'
-      lineinfile:
-        path: '{{ pgsql_conf_dir }}/postgresql.conf'
-        regexp: ^port\s*=\s*[0-9]+
-        line: 'port = {{ db_port }}'
-      register: pgsqlPortChanged
+    - name: docker-composeをインストールする
+      package: name=docker-compose state=present
 
-    - name: PostgreSQLのポート番号を変更した場合は即再起動する
-      service: name=postgresql state=restarted
-      when: pgsqlPortChanged.changed
+    - name: Dockerを自動起動にする
+      service: name=docker.service enabled=yes
 
-    - name: PostgreSQLへ外部から接続できるようにする
-      lineinfile:
-        path: '{{ pgsql_conf_dir }}/postgresql.conf'
-        regexp: ^listen_addresses\s*=
-        # ここで絞るとセキュリティグループとの二重管理になるので全開放で良い
-        line: "listen_addresses = '*'"
-      notify: restart_pgsql
+    - name: docker-compose用のプロジェクトディレクトリを作る
+      file:
+        path: '{{ docker_prj }}'
+        state: directory
+        mode: 0600
+        owner: root
+        group: root
 
-    - name: PostgreSQLへ外部からログインできるようにする
-      lineinfile:
-        path: '{{ pgsql_conf_dir }}/pg_hba.conf'
-        regexp: hostssl\s+all\s+
-        line: hostssl all all 0.0.0.0/0 md5
-      notify: restart_pgsql
+    - name: docker-compose.ymlを修正する
+      template:
+        src: '{{ playbook_dir }}/docker-compose.yml.j2'
+        dest: '{{ docker_prj }}/docker-compose.yml'
 
-    - name: PostgreSQLのエンコーディングを確認する
-      become: yes
-      become_user: postgres
-      shell: >-
-        psql --tuples-only --no-align
-        -c "select pg_encoding_to_char(encoding), datcollate from pg_catalog.pg_database where datname = 'template1'"
-      register: pgsqlEncoding
+    - docker_service:
+        project_name: postgres
+        project_src: '{{ docker_prj }}'
+
+    - name: PostgreSQLコンテナの初期化を待つ
+      shell: |
+        for i in $(seq 1 60); do
+          psql_out=$(psql -At postgres://{{ db_user }}:{{ db_password }}@localhost:{{ db_port }}/ -c 'SELECT 1')
+          if [ "$psql_out" = "1" ]; then exit 0; fi
+          sleep 1
+        done
+        exit 1
       changed_when: false
 
-    - name: PostgreSQLのエンコーディングを修正する
-      when: "'UTF8|C' != pgsqlEncoding.stdout"
-      become: yes
-      become_user: postgres
-      shell: 'psql -c "{{ item }}"'
+    - copy:
+        dest: '{{ item.dest }}'
+        src: '{{ item.src }}'
+        mode: 0600
+        remote_src: yes
       with_items:
-        - "UPDATE pg_database SET datistemplate = FALSE WHERE datname = 'template1'"
-        - DROP DATABASE template1
-        - CREATE DATABASE template1 WITH TEMPLATE = template0 ENCODING = 'UTF8' LC_COLLATE = 'C' LC_CTYPE = 'C'
-        - "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'template1'"
+        - dest: '{{ postgres_data }}/server.key'
+          src: /etc/ssl/private/ssl-cert-snakeoil.key
+        - dest: '{{ postgres_data }}/server.crt'
+          src: /etc/ssl/certs/ssl-cert-snakeoil.pem
 
-  handlers:
-    - name: restart_ssh
-      service: name=ssh state=restarted
-    - name: restart_pgsql
-      service: name=postgresql state=restarted
+    - name: SSL接続設定を有効にする
+      lineinfile:
+        path: '{{ postgres_data }}/postgresql.conf'
+        regexp: ^ssl\s+=
+        line: ssl = on
+      register: enableSsl
+
+    - name: PostgreSQLへの接続をSSLに限定する
+      lineinfile:
+        path: '{{ postgres_data }}/pg_hba.conf'
+        regexp: ^host(ssl)?\s+all\s+all\s+all\s+
+        line: hostssl all all all md5
+      register: sslOnly
+
+    - name: SSL接続設定を変更した場合はコンテナをリロードする
+      docker_service:
+        project_name: postgres
+        project_src: '{{ docker_prj }}'
+        restarted: yes
+      when: enableSsl.changed or sslOnly.changed
+
+    - name: PostgreSQLのタイムゾーンを確認する
+      shell: >-
+        psql postgres://{{ db_user }}:{{ db_password }}@localhost:{{ db_port }}/
+        --tuples-only --no-align -c 'show timezone'
+      register: pgTz
+      changed_when: false
+
+    - name: PostgreSQLのタイムゾーンを東京標準時にする
+      shell: >-
+        psql postgres://{{ db_user }}:{{ db_password }}@localhost:{{ db_port }}/
+        -c "{{ item }}"
+      with_items:
+        - "ALTER DATABASE {{ db_user }} SET timezone TO 'Asia/Tokyo'"
+        - ALTER DATABASE template1 SET timezone TO 'Asia/Tokyo'
+        - ALTER DATABASE template0 SET timezone TO 'Asia/Tokyo'
+        - SELECT pg_reload_conf()
+      when: "'Asia/Tokyo' != pgTz.stdout"

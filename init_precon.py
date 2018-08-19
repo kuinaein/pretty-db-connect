@@ -3,7 +3,7 @@
 
 from logging import getLogger, basicConfig as loggingBasicConfig
 import boto3
-from paramiko import SSHClient, AutoAddPolicy
+from paramiko import SSHClient, AutoAddPolicy, SFTPClient
 from importlib import import_module
 from sys import exit
 import os
@@ -145,24 +145,37 @@ def do_ansible(ssh: SSHClient):
             sftp.stat(remote_ansible_dir)
             ssh_exec(ssh, 'rm -rf ' + remote_ansible_dir)
         except IOError as ex:
-            if errno.ENOENT != ex.errno:
-                raise ex
+            # ファイルが存在しないと IOError になる
             logger.debug(ex)
-        sftp.mkdir(remote_ansible_dir, 0o755)
-        # どうやら paramiko には再帰コピー機能がないようなので地道にコピー
-        for fname in os.listdir(ansible_dir):
-            sftp.put(path.join(ansible_dir, fname),
-                     remote_ansible_dir + '/' + fname)
+        ssh_cpdir(sftp, ansible_dir, remote_ansible_dir)
     finally:
         sftp.close()
 
     logger.info('リモートサーバ上でAnsibleを実行します')
-    ssh_exec(ssh, 'ansible-playbook -i {inv} -e ssh_port={ssh} -e db_port={db} {book}'.format(
+    ssh_exec(ssh, 'ansible-playbook -i {inv} -e ssh_port={ssh_port} \
+-e db_port={db_port} -e db_user={db_user} -e db_password={db_pwd} {book}'.format(
         inv=remote_ansible_dir + '/hosts.yml',
         book=remote_ansible_dir + '/db.yml',
-        ssh=PRETTY_CONFIG['SSH_PORT'],
-        db=PRETTY_CONFIG['DB_PORT'],
+        ssh_port=PRETTY_CONFIG['SSH_PORT'],
+        db_port=PRETTY_CONFIG['DB_PORT'],
+        db_user=PRETTY_CONFIG['DB_USER'],
+        db_pwd=PRETTY_CONFIG['DB_PASSWORD'],
     ))
+
+
+def ssh_cpdir(sftp: SFTPClient, local_dir: str, remote_dir: str, cur: str=''):
+    """
+    どうやら paramiko には再帰コピー機能がないようなので地道にコピー
+    """
+    local_cur_dir = path.join(local_dir, cur)
+    remote_cur_dir = remote_dir if '' == cur else remote_dir + '/' + cur
+    sftp.mkdir(remote_cur_dir, 0o755)
+    for child_name in os.listdir(local_cur_dir):
+        child_path = path.join(local_cur_dir, child_name)
+        if path.isdir(child_path):
+            ssh_cpdir(sftp, local_dir, remote_dir, cur + '/' + child_name)
+        else:
+            sftp.put(child_path, remote_cur_dir + '/' + child_name)
 
 
 if '__main__' == __name__:

@@ -1,0 +1,17 @@
+version: '3'
+
+services:
+  postgres:
+    container_name: postgres
+    image: postgres
+    environment:
+      # 外部から接続可能にするのでちゃんと設定しないとまずい
+      # POSTGRES_DB: {{ db_user }}
+      POSTGRES_USER: {{ db_user }}
+      POSTGRES_PASSWORD: {{ db_password }}
+      POSTGRES_INITDB_ARGS: -E UTF-8 --no-locale
+    ports:
+      - {{ db_port }}:5432
+    volumes:
+      - {{ postgres_data }}:/var/lib/postgresql/data
+    restart: always
